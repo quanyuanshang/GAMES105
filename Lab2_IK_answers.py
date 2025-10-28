@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 from scipy.spatial.transform import Rotation as R
 def load_motion_data(bvh_file_path):
     """part2 辅助函数，读取bvh文件"""
@@ -18,19 +17,56 @@ def load_motion_data(bvh_file_path):
     return motion_data
 
 def rotation_matrix(a, b):
-    a=a/np.linalg.norm(a)
-    b=b/np.linalg.norm(b)
+    """
+    返回将向量a旋转到向量b的旋转矩阵
+    稳健版本：处理小向量、平行、反平行，保证右手坐标系
+    """
+    # 小向量直接返回单位矩阵
+    if np.linalg.norm(a) < 1e-8 or np.linalg.norm(b) < 1e-8:
+        return np.eye(3)
+
+    # 单位化
+    a = a / np.linalg.norm(a)
+    b = b / np.linalg.norm(b)
+
+    # 平行
+    if np.allclose(a, b):
+        return np.eye(3)
+
+    # 反平行
+    if np.allclose(a, -b):
+        # 找一个与a不平行的轴
+        if abs(a[0]) < 0.9:
+            perp = np.array([1, 0, 0])
+        else:
+            perp = np.array([0, 1, 0])
+        axis = np.cross(a, perp)
+        axis = axis / np.linalg.norm(axis)
+        return 2 * np.outer(axis, axis) - np.eye(3)
+
+    # 计算旋转轴和角度
     n = np.cross(a, b)
-    cos_theta = np.dot(a, b)
     sin_theta = np.linalg.norm(n)
-    theta = np.arctan2(sin_theta, cos_theta)
-    c = np.cos(theta)
-    s = np.sin(theta)
+    cos_theta = np.dot(a, b)
+    n = n / sin_theta  # 旋转轴单位化
+
+    c = cos_theta
+    s = sin_theta
     v = 1 - c
-    rotation_matrix = np.array([[n[0]*n[0]*v+c, n[0]*n[1]*v-n[2]*s, n[0]*n[2]*v+n[1]*s],
-                                [n[0]*n[1]*v+n[2]*s, n[1]*n[1]*v+c, n[1]*n[2]*v-n[0]*s],
-                                [n[0]*n[2]*v-n[1]*s, n[1]*n[2]*v+n[0]*s, n[2]*n[2]*v+c]])
-    return rotation_matrix
+
+    R_mat = np.array([
+        [n[0]*n[0]*v + c,   n[0]*n[1]*v - n[2]*s, n[0]*n[2]*v + n[1]*s],
+        [n[0]*n[1]*v + n[2]*s, n[1]*n[1]*v + c,   n[1]*n[2]*v - n[0]*s],
+        [n[0]*n[2]*v - n[1]*s, n[1]*n[2]*v + n[0]*s, n[2]*n[2]*v + c]
+    ])
+
+    # SVD正交化，保证右手坐标系
+    U, _, Vt = np.linalg.svd(R_mat)
+    R_mat = U @ Vt
+    if np.linalg.det(R_mat) < 0:
+        R_mat[:, -1] *= -1
+
+    return R_mat
 
 
 
@@ -67,7 +103,7 @@ def part1_inverse_kinematics(meta_data, joint_positions, joint_orientations, tar
     parent_idx = meta_data.joint_parent
     no_caled_orientation=joint_orientations.copy()
     local_rotation = [
-    R.from_matrix(inv_safe(joint_orientations[parent_idx[i]]) * from_quat_safe(joint_orientations[i])).as_quat()
+    R.from_matrix(inv_safe(joint_orientations[parent_idx[i]]) @ from_quat_safe(joint_orientations[i])).as_quat()
     for i in range(len(joint_orientations))]
     local_rotation[0]=R.from_matrix(from_quat_safe(joint_orientations[0])).as_quat()#root
     local_position= [joint_positions[i]-joint_positions[parent_idx[i]] for i
@@ -215,10 +251,96 @@ def part1_inverse_kinematics(meta_data, joint_positions, joint_orientations, tar
     return joint_positions, joint_orientations
 
 
+# def part1_inverse_kinematics(meta_data, joint_positions, joint_orientations, target_pose):
+#     path, path_name, path1, path2 = meta_data.get_path_from_root_to_end()
+#     parent_idx = meta_data.joint_parent
+
+#     # 保存原始局部旋转和骨骼长度
+#     local_rotation = [
+#         R.from_matrix(inv_safe(joint_orientations[parent_idx[i]]) @ from_quat_safe(joint_orientations[i])).as_quat()
+#         if i != 0 else R.from_matrix(from_quat_safe(joint_orientations[0])).as_quat()
+#         for i in range(len(joint_orientations))
+#     ]
+#     bone_lengths = [
+#         np.linalg.norm(joint_positions[i] - joint_positions[parent_idx[i]]) if i != 0 else 0
+#         for i in range(len(joint_positions))
+#     ]
+
+#     # 开始迭代
+#     path_end_id = path1[0]  # 末端手或脚
+#     for k in range(300):
+#         # 1. 正向迭代 path1（手臂/腿）
+#         for idx in range(len(path1)):
+#             joint_id = path1[idx]
+#             vec_to_end = joint_positions[path_end_id] - joint_positions[joint_id]
+#             vec_to_target = target_pose - joint_positions[joint_id]
+
+#             rot_matrix = rotation_matrix(vec_to_end, vec_to_target)
+#             rot_matrix = R.from_matrix(rot_matrix).as_matrix()
+
+#             # 更新关节朝向
+#             joint_orientations[joint_id] = R.from_matrix(rot_matrix @ from_quat_safe(joint_orientations[joint_id])).as_quat()
+
+#             # 更新子节点位置，同时保持骨骼长度不变
+#             for i in range(idx-1, -1, -1):
+#                 child_id = path1[i]
+#                 length = bone_lengths[child_id]
+#                 direction = joint_positions[child_id] - joint_positions[joint_id]
+#                 direction = rot_matrix @ direction
+#                 direction = direction / np.linalg.norm(direction) * length
+#                 joint_positions[child_id] = joint_positions[joint_id] + direction
+
+#         # 2. 反向迭代 path2（腿链）
+#         for idx in range(len(path2)-1, 0, -1):
+#             joint_id = path2[idx]
+#             parent_id = parent_idx[joint_id]
+#             vec_to_end = joint_positions[path_end_id] - joint_positions[joint_id]
+#             vec_to_target = target_pose - joint_positions[joint_id]
+#             rot_matrix = rotation_matrix(vec_to_end, vec_to_target)
+#             rot_matrix = R.from_matrix(rot_matrix).as_matrix()
+
+#             # 更新关节朝向
+#             joint_orientations[joint_id] = R.from_matrix(rot_matrix @ from_quat_safe(joint_orientations[joint_id])).as_quat()
+
+#             # 更新子节点位置，保持骨骼长度
+#             for i in range(idx, len(path2)):
+#                 child_id = path2[i]
+#                 length = bone_lengths[child_id]
+#                 direction = joint_positions[child_id] - joint_positions[joint_id]
+#                 direction = rot_matrix @ direction
+#                 direction = direction / np.linalg.norm(direction) * length
+#                 joint_positions[child_id] = joint_positions[joint_id] + direction
+
+#         # 3. 检查收敛
+#         cur_dis = np.linalg.norm(joint_positions[path_end_id] - target_pose)
+#         if cur_dis < 0.01:
+#             break
+
+#     print("距离", cur_dis, "迭代了", k, "次")
+
+#     # 更新其他非路径节点
+#     for i in range(len(joint_orientations)):
+#         if i not in path and i != 0:
+#             parent_rot = from_quat_safe(joint_orientations[parent_idx[i]])
+#             joint_orientations[i] = R.from_matrix(parent_rot @ R.from_quat(local_rotation[i]).as_matrix()).as_quat()
+#             joint_positions[i] = joint_positions[parent_idx[i]] + parent_rot @ (joint_positions[i] - joint_positions[parent_idx[i]])
+
+#     return joint_positions, joint_orientations
+
+
+
 def part2_inverse_kinematics(meta_data, joint_positions, joint_orientations, relative_x, relative_z, target_height):
     """
     输入lWrist相对于RootJoint前进方向的xz偏移，以及目标高度，IK以外的部分与bvh一致
     """
+    path, path_name, path1, path2=meta_data.get_path_from_root_to_end()
+    target_pose=joint_positions[0]+np.array([relative_x,target_height-joint_positions[0][1],relative_z])
+    IK_joint_positions, IK_joint_orientations=part1_inverse_kinematics(meta_data, joint_positions, joint_orientations, target_pose)
+    for i in path:
+        joint_positions[i]=IK_joint_positions[i]
+        
+        joint_orientations[i]=IK_joint_orientations[i]
+
     
     return joint_positions, joint_orientations
 
